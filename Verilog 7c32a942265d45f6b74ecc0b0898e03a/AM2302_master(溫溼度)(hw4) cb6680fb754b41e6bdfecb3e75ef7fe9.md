@@ -1,0 +1,623 @@
+# AM2302_master(溫溼度)(hw4)
+
+## AM2302_master
+
+```verilog
+module AM2302_master (
+		clk,
+      rst_n,
+      sfr_rd,
+      sfr_wr,
+      sfr_data_in,
+      sfr_data_out,
+      sfr_addr,
+      sda
+   );
+	/*---------Ports Declarations---------*/
+	input       clk;
+	input       rst_n;
+	input       sfr_rd;
+	input       sfr_wr;
+	inout       sda;
+	input  [7:0]sfr_addr;
+	input  [7:0]sfr_data_out;
+	output [7:0]sfr_data_in;
+	reg    [7:0]sfr_data_in;
+	/*---------variables---------*/
+	reg         en;
+	reg         flag;
+	wire  [39:0]data_o;
+	wire        dataReady;
+	/*---------module AM2302_controller instantiation---------*/
+	AM2302_controller U0(
+		.clkSys(clk), 
+		.en(en),
+		.rst_n(rst_n), 
+		.SDA(sda), 
+		.dataReady(dataReady), 
+		.data_o(data_o)
+	);
+	/*---------control en---------*/
+	always@(posedge clk or negedge rst_n)begin
+		if(!rst_n)en <= 1'b0;
+		else begin
+			if(sfr_addr==8'he1 && sfr_wr && sfr_data_out[0])en <= 1'b1;
+			else                                            en <= 1'b0;
+		end
+	end
+	/*---------sfr_data_in---------*/
+	always@(posedge clk or negedge rst_n)begin
+		if(!rst_n)begin
+			sfr_data_in <= 8'h00;
+			flag        <= 1'b0;
+		end 
+		else begin
+			if(dataReady)begin
+				sfr_data_in <= 8'h11;
+				flag        <= 1'b1;
+			end
+			else if(sfr_addr == 8'he1 && !flag)begin
+				sfr_data_in <= 8'h00;
+			end  			
+			else if(sfr_addr == 8'he1 && flag)begin
+				sfr_data_in <= data_o[39:32];
+			end
+			else if(sfr_addr == 8'he2)begin
+				sfr_data_in <= data_o[31:24];
+			end
+			else if(sfr_addr == 8'he3)begin
+				sfr_data_in <= data_o[23:16];
+			end
+			else if(sfr_addr == 8'he4)begin
+				sfr_data_in <= data_o[15:8];
+			end
+			else if(sfr_addr == 8'he5)begin
+				sfr_data_in <= data_o[7:0];
+			end
+			else if(sfr_addr == 8'he6)begin
+				sfr_data_in <= 8'h00;
+				flag        <= 1'b0;
+			end
+			else begin
+				sfr_data_in <= sfr_data_in;
+			end 			
+		end
+	end
+	
+	endmodule
+```
+
+## AM2302_controller
+
+```verilog
+module AM2302_controller(clkSys, en, rst_n, SDA, dataReady, data_o);
+	/*---------parameter Declarations---------*/
+	//===== state machine =====//
+	localparam IDLE     = 3'd0;
+	localparam Be       = 3'd1;
+	localparam GO       = 3'd2;
+	localparam REL      = 3'd3;
+	localparam REH      = 3'd4;
+	localparam DATA     = 3'd5;
+	localparam CHECKOUT = 3'd6;
+	//===== during time =====//
+	localparam durBe       = 16'd50000;//1ms
+	localparam durGo       = 16'd1500; //30us
+	localparam durRel      = 16'd2555; //80us
+	localparam durReh      = 16'd2560; //80us
+	localparam durDataHIGH = 16'd2580; //70us
+	localparam durDataMax  = 16'd5000; //100us
+	/*---------Ports Declarations---------*/
+	input        clkSys;
+	input        en;
+	input        rst_n;
+	inout        SDA;
+	output       dataReady;
+	output [39:0]data_o;
+	reg          dataReady;
+	reg    [39:0]data_o;
+	/*---------variables---------*/
+	reg     [2:0]fstate;
+	reg    [15:0]counter;
+	reg    [39:0]databuf;
+	reg          counterEN;
+	reg          flag_get;
+	reg          dataSave;
+	reg          dataCheck;
+	reg          sdaReg;
+	/*---------assign wire---------*/
+	assign SDA = (sdaReg)?(1'bz):(1'b0);
+	/*---------counter---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)        counter <= 16'd0;
+		else if(counterEN)counter <= counter + 16'd1;
+		else              counter <= 16'd0;
+	end
+	/*---------fstate_state---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)fstate <= IDLE;
+		else begin
+			case(fstate)
+				IDLE:begin
+					if(en)fstate <= Be;
+					else  fstate <= IDLE;
+				end
+				Be:begin
+					if(counter == durBe)fstate <= GO;
+					else                fstate <= Be;
+				end
+				GO:begin
+					if(counter == durGo)fstate <= REL;
+					else                fstate <= GO;
+				end
+				REL:begin
+					if(counter == durRel)fstate <= REH;
+					else                 fstate <= REL;
+				end
+				REH:begin
+					if(counter == durReh)fstate <= DATA;
+					else                 fstate <= REH;
+				end
+				DATA:begin
+					if(counter == durDataMax)fstate <= CHECKOUT;
+					else                     fstate <= DATA;
+				end
+				CHECKOUT:fstate <= IDLE;
+				default: fstate <= IDLE;
+			endcase
+		end
+	end
+	/*---------fstate_output---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)begin
+			counterEN <= 1'b0;
+			dataSave  <= 1'b0;
+			dataCheck <= 1'b0;
+			sdaReg    <= 1'b1;
+		end 
+		else begin
+			case(fstate)
+				IDLE:begin
+					counterEN <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end
+				Be:begin
+					if(counter < durBe)counterEN  <= 1'b1;
+					else               counterEN  <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b0;
+				end
+				GO:begin
+					if(counter < durGo)counterEN  <= 1'b1;
+					else               counterEN  <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end
+				REL:begin
+					if(!SDA && counter < durRel)counterEN  <= 1'b1;
+					else                        counterEN  <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end
+				REH:begin
+					if(SDA && counter < durReh)counterEN  <= 1'b1;
+					else                       counterEN  <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end
+				DATA:begin
+					if(SDA && counter < durDataMax)counterEN  <= 1'b1;
+					else                           counterEN  <= 1'b0;
+					dataSave  <= 1'b1;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end
+				CHECKOUT:begin
+					counterEN <= 1'b0;
+					dataSave  <= 1'b1;
+					dataCheck <= 1'b1;
+					sdaReg    <= 1'b1;
+				end 
+				default:begin
+					counterEN <= 1'b0;
+					dataSave  <= 1'b0;
+					dataCheck <= 1'b0;
+					sdaReg    <= 1'b1;
+				end 
+			endcase
+		end
+	end
+	/*---------flag---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)flag_get <= 1'b0;
+		else      flag_get <= SDA;
+	end
+	/*---------put data in databuf---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)databuf <= 39'd0;
+		else begin
+			if(fstate > REH)begin
+				if(!SDA && flag_get && (counter > durDataHIGH))     databuf <= {databuf[38:0],1'b1};
+				else if(!SDA && flag_get && (counter < durDataHIGH))databuf <= {databuf[38:0],1'b0};
+				else                                                databuf <= databuf;
+			end
+			else databuf <= 39'd0;
+		end 
+	end
+	/*---------check data and sent dataReady---------*/
+	always@(posedge clkSys or negedge rst_n)begin
+		if(!rst_n)begin
+			data_o    <= 39'd0; 
+			dataReady <= 1'b0;
+		end 
+		else begin
+			if(fstate==CHECKOUT)begin
+				if(databuf[7:0]==databuf[39:32]+databuf[31:24]+databuf[23:16]+databuf[15:8])begin
+					data_o    <= databuf;
+					dataReady <= 1'b1;
+				end 
+				else begin
+					data_o    <= data_o;
+					dataReady <= 1'b0;
+				end 
+			end
+			else begin
+				data_o    <= data_o;
+				dataReady <= 1'b0;
+			end
+		end
+	end
+	
+	endmodule
+```
+
+## TestBench
+
+```verilog
+`timescale 1ns / 10ps
+module tb_8051 ();
+   parameter       clkx8 = 27.08;  // 48*64=3.072 MHZ,325/12=27.08
+   reg clk; 
+   reg por_n; 
+   reg rst_in_n; 
+   wire rst_out_n; 
+   reg test_mode_n; 
+   wire stop_mode_n; 
+   wire idle_mode_n; 
+   wire [7:0] sfr_addr; 
+   wire [7:0] sfr_data_out; 
+   wire [7:0] sfr_data_in; 
+   wire sfr_wr; 
+   wire sfr_rd; 
+   wire [15:0] mem_addr; 
+   wire [7:0] mem_data_out; 
+   wire [7:0] mem_data_in; 
+   wire mem_wr_n; 
+   wire mem_rd_n; 
+   wire mem_pswr_n;    
+   
+   wire mem_psrd_n; 
+   wire mem_ale; 
+   reg mem_ea_n; 
+   wire int0_n; 
+   wire int1_n; 
+   wire int2; 
+   wire int3_n; 
+   wire int4; 
+   wire int5_n; 
+   wire pfi; 
+   wire wdti; 
+   wire rxd0_in; 
+   wire rxd0_out, txd0; 
+   wire rxd1_in; 
+   wire rxd1_out, txd1; 
+   wire t0; 
+   wire t1; 
+   wire t2; 
+   wire t2ex; 
+   wire t0_out, t1_out, t2_out; 
+   wire port_pin_reg_n, p0_mem_reg_n, p0_addr_data_n, p2_mem_reg_n; 
+   wire [7:0] iram_addr, iram_data_out, iram_data_in; 
+   wire iram_rd_n, iram_we1_n, iram_we2_n; 
+   wire [15:0] irom_addr; 
+   wire [7:0] irom_data_out; 
+   wire irom_rd_n, irom_cs_n; 
+  
+   wire [7:0] P0,P1,P2,P3;
+   
+   //wire i2c_sda;
+   //wire i2c_scl;
+   
+   wire am2302_sda;
+
+   
+   //pullup(i2c_sda);
+   //pullup(i2c_scl);
+   
+   pullup(am2302_sda);
+   
+   always
+   begin
+      #(clkx8/2) clk <= 1'b1 ;
+      #(clkx8/2) clk <= 1'b0 ;
+   end 
+
+   initial
+    begin
+   
+      //$fsdbDumpfile("tb_8051.fsdb");
+      //$fsdbDumpfile("tb_8051_io.fsdb"); 
+      //$fsdbDumpvars;
+            
+      mem_ea_n = 1'b1;              // 1: external ROM ,0: Internal ROM
+      por_n = 1'b1 ;
+      rst_in_n  = 1'b1;
+      test_mode_n = 1'b1;
+      #(clkx8*10);
+      por_n = 1'b0 ;
+      rst_in_n  = 1'b0;
+      #(clkx8*10);
+      por_n = 1'b1 ;
+      rst_in_n  = 1'b1;
+      
+      wait((irom_addr == 16'h0B16) | (irom_addr == 16'h0B19));
+      #1_000_000;
+      $stop;
+
+    end
+     
+     
+  
+//--------------------------------------------------------------- 
+// DW8051 instantiation: 
+//--------------------------------------------------------------- 
+DW8051_core u0 ( 
+               .clk (clk), 
+               .por_n (por_n), 
+               .rst_in_n (rst_in_n), 
+               .rst_out_n (rst_out_n), 
+               .test_mode_n (test_mode_n), 
+               .stop_mode_n (stop_mode_n), 
+               .idle_mode_n (idle_mode_n), 
+               .sfr_addr (sfr_addr), 
+               .sfr_data_out (sfr_data_out), 
+               .sfr_data_in (sfr_data_in), 
+               .sfr_wr (sfr_wr), 
+               .sfr_rd (sfr_rd), 
+               .mem_addr (mem_addr), 
+               .mem_data_out (mem_data_out), 
+               .mem_data_in (mem_data_in), 
+               .mem_wr_n (mem_wr_n), 
+               .mem_rd_n (mem_rd_n), 
+               .mem_pswr_n (mem_pswr_n), 
+               .mem_psrd_n (mem_psrd_n), 
+               .mem_ale (mem_ale), 
+               .mem_ea_n (mem_ea_n),
+               .int0_n (int0_n), 
+               .int1_n (int1_n), 
+               .int2 (int2), 
+               .int3_n (int3_n), 
+               .int4 (int4), 
+               .int5_n (int5_n), 
+               .pfi (pfi), 
+               .wdti (wdti), 
+               .rxd0_in (rxd0_in), 
+               .rxd0_out (rxd0_out), 
+               .txd0 (txd0), 
+               .rxd1_in (rxd1_in), 
+               .rxd1_out (rxd1_out), 
+               .txd1 (txd1), 
+               .t0 (t0), 
+               .t1 (t1), 
+               .t2 (t2), 
+               .t2ex (t2ex), 
+               .t0_out (t0_out), 
+               .t1_out (t1_out), 
+               .t2_out (t2_out), 
+               .port_pin_reg_n (port_pin_reg_n), 
+               .p0_mem_reg_n (p0_mem_reg_n), 
+               .p0_addr_data_n (p0_addr_data_n), 
+               .p2_mem_reg_n (p2_mem_reg_n), 
+               .iram_addr (iram_addr), 
+               .iram_data_out (iram_data_out), 
+               .iram_data_in (iram_data_in), 
+               .iram_rd_n (), 
+               .iram_we1_n (iram_we1_n), 
+               .iram_we2_n (iram_we2_n), 
+               .irom_addr (irom_addr), 
+               .irom_data_out (irom_data_out), 
+               .irom_rd_n (irom_rd_n), 
+               .irom_cs_n (irom_cs_n) 
+               );
+  /*                   
+   sfr_mem      u1_sfr_mem(
+                        .clk(clk),
+                        .addr(sfr_addr),     
+                        .data_in(sfr_data_out),
+                        .data_out(sfr_data_in),
+                        .wr_n(~sfr_wr),       
+                        .rd_n(~sfr_rd)) ;  
+   */     
+                   
+   int_mem      u3_int_mem(
+                        .clk(clk),
+                        .addr(iram_addr),
+                        .data_in(iram_data_in),
+                        .data_out(iram_data_out),
+                        .we1_n(iram_we1_n),
+                        .we2_n(iram_we2_n),
+                        .rd_n(iram_rd_n));  
+                        
+ /*                                       
+   ext_mem      u2_ext_mem(
+                        .addr(mem_addr),
+                        .data_in(mem_data_out),
+                        .data_out(mem_data_in),
+                        .wr_n(mem_wr_n),
+                        .rd_n(mem_rd_n));    
+   */                     
+                          
+  rom_mem       u4_rom_mem(
+                        .addr(irom_addr),
+                        .data_out(irom_data_out),                    
+                        .rd_n(irom_rd_n),
+                        .cs_n(irom_cs_n));  
+                        
+                        
+ AM2302_master u8 (
+         .clk(clk),
+         .rst_n(rst_in_n),
+         .sfr_rd(sfr_rd),
+         .sfr_wr(sfr_wr),
+         .sfr_data_in(sfr_data_in),
+         .sfr_data_out(sfr_data_out),
+         .sfr_addr(sfr_addr),
+         .sda(am2302_sda)
+         );                         
+//--------------------------------------------------------------- 
+// EEPROM Model
+//---------------------------------------------------------------                         
+/*
+ M24AA256 u10(
+    .A0(1'b0), 
+    .A1(1'b0), 
+    .A2(1'b0), 
+    .WP(1'b0), 
+    .SDA(i2c_sda), 
+    .SCL(i2c_scl), 
+    .RESET(~rst_in_n)
+    );     */ 
+    
+//--------------------------------------------------------------- 
+// AM2302 Model
+//---------------------------------------------------------------      
+    
+ AM2302 u11(
+    .SDA(am2302_sda)  
+    );             
+	 
+	 
+                                                           
+always@(posedge clk)                      
+ begin
+ if(sfr_rd)
+   begin
+   if((sfr_addr == 8'hE2)||(sfr_addr == 8'hE3)||(sfr_addr == 8'hE4)||(sfr_addr == 8'hE5)||(sfr_addr == 8'hE6))
+     $display("time=%3d,sfr_rd=%x,sfr_addr=0x%x,sfr_data_in=0x%x ",$time,sfr_rd,sfr_addr,sfr_data_in); 
+   end
+ end
+ 
+//initial
+//  begin
+  //$monitor("time=%3d memory_000=0x%x memory_001=0x%x",$time,u10.MemoryByte_000[7:0],u10.MemoryByte_001[7:0]);
+//  $monitor("time=%3d,sfr_rd=%x,sfr_addr=0x%x,sfr_data_in=0x%x ",$time,sfr_rd,sfr_addr,sfr_data_in);
+//  end
+   
+endmodule
+```
+
+## AM2302
+
+```verilog
+`timescale 1ns/10ps
+
+module AM2302 (SDA);
+  
+   inout                SDA;                            // serial data I/O   
+
+   
+
+// *******************************************************************************************************
+// **   DECLARATIONS                                                                                    **
+// *******************************************************************************************************
+
+ 
+
+   reg  [39:00]         SensorData;          // data array
+   wire                 SDA_IN;
+   integer              ii;
+   reg                  SDA_OE;
+   reg                  SDA_DO;
+
+// *******************************************************************************************************
+// **   INITIALIZATION                                                                                  **
+// *******************************************************************************************************
+ 
+
+   initial begin
+      SDA_DO = 0;
+      SDA_OE = 0;
+      
+      SensorData = 40'h1234567814;
+   end
+ 
+   
+   assign SDA = (SDA_OE)? SDA_DO : 1'bz ;
+   assign SDA_IN = SDA;
+
+// *******************************************************************************************************
+// **   CORE LOGIC                                                                                      **
+// *******************************************************************************************************
+//always@(posedge CLK)
+always
+ begin       
+     
+     wait(SDA_IN == 0);       // wait write pulse  
+      //  $width (negedge SDA_IN, 800_000); // min 800us
+     wait(SDA_IN == 1);
+     ///   $width (posedge SDA_IN, 20_000); // min 20us     
+      #30_000;  
+      SDA_DO = 0; SDA_OE = 1;
+      #(80_000);
+      
+      SDA_DO = 1; SDA_OE = 1;
+      #(80_000);      
+      
+      $display("time=%3d,sensor send 0x%X",$time,SensorData); 
+      // send Data Byte
+      for (ii=39; ii >= 0; ii=ii-1)
+        begin
+          SDA_DO = 0; SDA_OE = 1;
+          #(50_000);
+          
+          SDA_DO = 1; SDA_OE = 1;
+          if(SensorData[ii] == 1'b1)
+            #(70_000);
+          else
+            #(26_000);
+          
+        end            
+        
+    SDA_DO = 0; SDA_OE = 1;   // end
+    #(50_000);
+    
+    SDA_OE = 0;  // RELEASE SDA    
+    $display("sensor send end");
+    #(1_000_000);
+    //  $display("uart rx data = %X ", RX_Serial);     
+ end
+
+//specify 
+//   $width(negedge SDA_IN, 800_000); /* 4 is ok */ 
+//endspecify
+
+endmodule
+```
+
+## Wave
+
+![AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/Untitled.png](AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/Untitled.png)
+
+![AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/wave.png](AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/wave.png)
+
+![AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/wave1234567814.png](AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/wave1234567814.png)
+
+## Monitor
+
+![AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/monitor.png](AM2302_master(%E6%BA%AB%E6%BA%BC%E5%BA%A6)(hw4)%204767215d1fcf42049b8e9ad83202aa8b/monitor.png)
