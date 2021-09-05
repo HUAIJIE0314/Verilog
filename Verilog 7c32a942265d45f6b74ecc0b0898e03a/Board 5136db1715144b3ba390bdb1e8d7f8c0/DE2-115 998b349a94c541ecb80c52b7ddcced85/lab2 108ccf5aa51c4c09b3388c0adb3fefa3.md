@@ -1,0 +1,627 @@
+# lab2
+
+```verilog
+as	`include "edge_detect.v"
+	module lab2(CLOCK_50, KEY, GPIO);
+	/*-------------parameter-------------*/
+	parameter IDLE     = 2'd0;
+	parameter SendData = 2'd1;
+	parameter Sendend  = 2'd2;
+	/*-------------ports declaration-------------*/
+	input  		 CLOCK_50;
+	input  [3:0] KEY;
+	output [35:0]GPIO;
+	assign {GPIO[35:9],GPIO[7:0]} = 35'd0;
+	/*-------------variables-------------*/
+	reg  [3:0]key2_dly;
+	reg  [3:0]key1_dly;
+	reg  [5:0]cnt;//0-59
+	reg  [7:0]cnt_data, cnt_num;//0-191
+	reg  [5:0]cnt_reset;//0-44
+	reg  [1:0]fstate;
+	reg       counterEN;
+	reg       SDA_temp;
+	reg       tick_833k;
+	reg       en;
+	reg       SHEN;
+	reg       flag_rst;
+	reg  [1:0]color;
+	reg  [2:0]digit;
+	reg  [4:0]index;
+	reg  [23:0]RGBdata;
+	reg  [23:0]CurrentColor;
+	wire [23:0]red     = {8'h00,8'h40,8'h00};
+	wire [23:0]green   = {8'h40,8'h00,8'h00};
+	wire [23:0]blue    = {8'h00,8'h00,8'h40};
+	wire [23:0]nocolor = {8'h00,8'h00,8'h00};
+	wire [1:0]low_or_high;
+	wire KEY1AND, KEY2AND;
+	wire neg_edge_KEY1, neg_edge_KEY2;
+	/*-------------assign wire-------------*/
+	assign KEY1AND = &key1_dly;
+	assign KEY2AND = &key2_dly;
+	assign low_or_high[0] = (cnt<=6'd19)?(1'b1):(1'b0);
+	assign low_or_high[1] = (cnt<=6'd39)?(1'b1):(1'b0);
+	assign GPIO[8] = (SHEN)?(low_or_high[SDA_temp]):(1'b0);
+	/*-------------edge_detect instantiate-------------*/
+	edge_detect U0(
+		.clk(CLOCK_50),
+		.rst_n(KEY[3]),
+		.data_in(KEY1AND),
+		.pos_edge(),
+		.neg_edge(neg_edge_KEY1) 
+   );
+	edge_detect U1(
+		.clk(CLOCK_50),
+		.rst_n(KEY[3]),
+		.data_in(KEY2AND),
+		.pos_edge(),
+		.neg_edge(neg_edge_KEY2) 
+   );
+	/*-------------debounce-------------*/
+	always@(posedge CLOCK_50)begin
+		key2_dly <= {key2_dly[2:0],KEY[2]};
+		key1_dly <= {key1_dly[2:0],KEY[1]};
+	end
+	/*-------------push button-------------*/
+	//en
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])en <= 1'b0;
+		else begin
+			if(neg_edge_KEY1||neg_edge_KEY2||!KEY[0])en <= 1'b1;
+			else                                     en <= 1'b0;
+		end
+	end
+	//digit
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])digit <= 3'd0;
+		else begin
+			//KEY[1]
+			if(neg_edge_KEY1)digit <= digit + 3'd1;
+			//KEY[0]
+			else if(!KEY[0]) digit <= 3'd0;
+			else             digit <= digit;
+		end
+	end
+	//color
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])begin
+			flag_rst <= 1'b0;
+			color    <= 2'd0;
+		end 
+		else begin
+			//KEY[2]
+			if(neg_edge_KEY1&&flag_rst)begin
+				color <= 2'd0;
+				flag_rst <= 1'b0;
+			end
+			else if(neg_edge_KEY2)begin
+				if(color<2'd2)color <= color + 2'd1;
+				else          color <= 2'd0;
+			end 
+			else if(!KEY[0])begin
+				color <= 2'd3;
+				flag_rst <= 1'b1;
+			end 
+			else color <= color;
+		end
+	end
+	/*-------------set cnt_num-------------*/
+	always@(posedge CLOCK_50)begin
+		case((digit-3'd1))
+			3'd0:cnt_num <= 8'd23;
+			3'd1:cnt_num <= 8'd47;
+			3'd2:cnt_num <= 8'd71;
+			3'd3:cnt_num <= 8'd95;
+			3'd4:cnt_num <= 8'd119;
+			3'd5:cnt_num <= 8'd143;
+			3'd6:cnt_num <= 8'd167;
+			3'd7:cnt_num <= 8'd191;
+			default:cnt_num <= 8'd23;
+		endcase
+	end
+	/*-------------set color-------------*/
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])RGBdata <= nocolor;
+		else begin
+			case((color))
+				2'd0:RGBdata <= red;
+				2'd1:RGBdata <= green;
+				2'd2:RGBdata <= blue;
+				2'd3:RGBdata <= nocolor;
+				default:RGBdata <= nocolor;
+			endcase
+		end
+	end
+	/*-------------cnt-------------*/
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])cnt <= 6'd0;
+		else begin
+			if(counterEN)begin
+				if(cnt<6'd59)cnt <= cnt + 6'd1;
+				else         cnt <= 6'd0;
+			end
+			else begin
+				cnt <= 6'd0;
+			end
+		end
+	end
+	/*-------------tick_833k-------------*/
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])tick_833k <= 1'b0;
+		else begin
+			if(cnt==6'd58)tick_833k <= 1'b1;
+			else          tick_833k <= 1'b0;
+		end
+	end
+	/*-------------fstate state-------------*/
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])fstate <= IDLE;
+		else begin
+			case(fstate)
+				IDLE:begin
+					if(en)fstate <= SendData;
+					else  fstate <= IDLE;
+				end
+				SendData:begin
+					if(cnt_data==8'd192&&tick_833k)fstate <= Sendend;
+					else                           fstate <= SendData;
+				end
+				Sendend:begin
+					if(cnt_reset==6'd44&&tick_833k)fstate <= IDLE;
+					else                           fstate <= Sendend;
+				end
+				default:fstate <= IDLE;
+			endcase
+		end
+	end
+	/*-------------fstate output-------------*/
+	always@(posedge CLOCK_50 or negedge KEY[3])begin
+		if(!KEY[3])begin
+			counterEN    <= 1'b0;
+			SDA_temp     <= 1'b0;
+			cnt_data     <= 8'd0;
+			SHEN         <= 1'b0;
+			cnt_reset    <= 6'd0;
+			index        <= 5'd23;
+			CurrentColor <= nocolor;
+		end
+		else begin
+			case(fstate)
+				IDLE:begin
+					counterEN    <= 1'b0;
+					SDA_temp     <= 1'b0;
+					cnt_data     <= 8'd0;
+					SHEN         <= 1'b0;
+					cnt_reset    <= 6'd0;
+					index        <= 5'd23;
+					CurrentColor <= nocolor;
+				end
+				SendData:begin
+					counterEN <= 1'b1;
+					if(tick_833k)begin
+						if(index>5'd0)index <= index - 5'd1;
+						else          index <= 5'd23;
+						if(cnt_data<=cnt_num)CurrentColor <= RGBdata;
+						else                 CurrentColor <= nocolor;
+						SDA_temp  <= CurrentColor[index];
+						cnt_data  <= cnt_data + 8'd1;
+						SHEN      <= 1'b1;
+					end
+					else begin
+						index        <= index;
+						CurrentColor <= CurrentColor;
+						cnt_data     <= cnt_data;
+						SHEN         <= SHEN;
+					end
+					cnt_reset <= 6'd0;
+				end
+				Sendend:begin
+					index        <= 5'd23;
+					counterEN    <= 1'b1;
+					SDA_temp     <= 1'b0;
+					cnt_data     <= 8'd0;
+					SHEN         <= 1'b0;
+					CurrentColor <= nocolor;
+					if(tick_833k)cnt_reset <= cnt_reset + 6'd1;
+					else         cnt_reset <= cnt_reset;
+				end
+				default:begin
+					index        <= index;
+					counterEN    <= counterEN;
+					SDA_temp     <= SDA_temp;
+					cnt_data     <= cnt_data;
+					SHEN         <= SHEN;
+					CurrentColor <= nocolor;
+					cnt_reset    <= cnt_reset;
+				end
+			endcase
+		end
+	end
+	endmodule
+```
+
+## TestBench
+
+```verilog
+`timescale 1ns/1ns
+
+module lab2_tb;
+
+reg clk_50M;
+//reg reset_n;  //low active
+
+reg [3:0] key;
+wire [35:0] gpio;
+//wire [7:0]cnt_data,cnt_num;
+//wire [23:0]CurrentColor;
+lab2 U1(
+                //////// CLOCK //////////
+                .CLOCK_50(clk_50M),
+                .KEY(key),
+               
+                ///////////////////////
+                .GPIO(gpio)
+					 //.cnt_data(cnt_data), 
+					 //.cnt_num(cnt_num),
+					 //.CurrentColor(CurrentColor)
+                               
+        );  
+
+always
+  #10 clk_50M = ~clk_50M;
+  
+
+initial
+  begin  
+  clk_50M = 0 ;  
+
+  key[0] = 1;     // reset , low active
+  key[1] = 1;
+  key[2] = 1;
+  key[3] = 0;
+  #30 key[3] = 1;
+  //#30 key[0] = 1;  
+  
+  #200_000
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  
+  
+  $stop;
+  end
+  
+initial
+  begin
+  $monitor("time=%3d,key[0]=%d,key[1]=%d,key[2]=%d,gpio_8=%d ",$time,key[0],key[1],key[2],gpio[8]);
+  end
+  
+  
+endmodule
+
+/*
+`timescale 1ns/1ns
+
+module lab2_tb;
+
+reg clk_50M;
+//reg reset_n;  //low active
+
+reg [3:0] key;
+wire [35:0] gpio;
+wire [7:0]cnt_data,cnt_num;
+wire [23:0]CurrentColor;
+lab2 U1(
+                //////// CLOCK //////////
+                .CLOCK_50(clk_50M),
+                .KEY(key),
+               
+                ///////////////////////
+                .GPIO(gpio),
+					 .cnt_data(cnt_data), 
+					 .cnt_num(cnt_num),
+					 .CurrentColor(CurrentColor)
+                               
+        );  
+
+always
+  #10 clk_50M = ~clk_50M;
+  
+
+initial
+  begin  
+  clk_50M = 0 ;  
+
+  key[0] = 1;     // reset , low active
+  key[1] = 1;
+  key[2] = 1;
+  key[3] = 0;
+  #30 key[3] = 1;
+  //#30 key[0] = 1;  
+  
+  #200_000
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  
+  
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  
+  
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  
+  // second key1 press
+  key[0] = 0;     // key2 press
+  #100;
+  key[0] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  #12_000_000;
+  
+  // second key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,two LED on
+  
+  // first key0 press
+  key[1] = 0;     // key1 press
+  #12_000_000
+  key[1] = 1;     // key1 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,one LED on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  // first key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,green color on
+  
+  // second key1 press
+  key[2] = 0;     // key2 press
+  #12_000_000
+  key[2] = 1;     // key2 release  
+  #1_000_000;     // wait 1ms , send WS2812B packet ,blue color on
+  
+  $stop;
+  end
+  
+initial
+  begin
+  $monitor("time=%3d,key[0]=%d,key[1]=%d,key[2]=%d,gpio_8=%d ",$time,key[0],key[1],key[2],gpio[8]);
+  end
+  
+  
+endmodule
+*/
+```
+
+## Wave
+
+![../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Wave_1.png](../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Wave_1.png)
+
+![../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Wave_2.png](../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Wave_2.png)
+
+## Edge_Detect
+
+```verilog
+module edge_detect (
+   clk,
+   rst_n,
+   data_in,
+   pos_edge,
+   neg_edge 
+   );
+input      clk;
+input      rst_n;
+input      data_in;
+output     pos_edge;
+output     neg_edge;
+
+reg        data_in_d1;
+reg        data_in_d2; 
+
+assign pos_edge =  data_in_d1 & ~data_in_d2;
+assign neg_edge =  ~data_in_d1 & data_in_d2;
+
+ 
+always@(posedge clk or negedge rst_n) 
+begin
+  if (!rst_n)
+  begin
+    data_in_d1 <= 1'b0;
+    data_in_d2 <= 1'b0;
+  end
+  else 
+  begin
+    data_in_d1 <= data_in;
+    data_in_d2 <= data_in_d1;   
+  end
+end
+
+/*
+always@(posedge clk) 
+begin 
+  data_in_d1 <=#1 data_in;
+  data_in_d2 <=#1 data_in_d1;   
+end
+ */
+endmodule
+```
+
+## Compilation Report
+
+![../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled.png](../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled.png)
+
+## RTL Viewer
+
+![../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled%201.png](../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled%201.png)
+
+## State Machine
+
+![../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled%202.png](../../lab2%204f7594fb6bb841c4b6114f9eb3d7f312/Untitled%202.png)
